@@ -55,6 +55,10 @@ Configuration defaults:
 
 The service will identify managed containers by Compose labels and expected project/service names rather than fragile container IDs. It will reject ambiguous or missing targets.
 
+Nightwatchman and the local CLI will use Python 3.13 and share a tested Portainer/Docker API client package. GitHub Actions will build and publish the recovery image to `ghcr.io/ckonkel/nightwatchman`, tagged with both a release version and an immutable commit SHA. Production Compose deployments will reference a pinned published tag or digest; Portainer will not build the production image from the Git checkout.
+
+Nightwatchman will poll health every five seconds. It will persist the continuous-failure start time, remediation-attempt time, and cooldown deadline in a small named volume using atomic state-file replacement. On startup it will reconcile persisted timing data with actual container state before acting. Host wall-clock timestamps will be used for persisted deadlines, with invalid or future-skewed state handled conservatively and logged.
+
 ### Local Portainer CLI
 
 The repository will provide an executable `nightwatchman` helper for administrative access. It is separate from the deployed recovery service and communicates with Portainer's HTTP API.
@@ -80,6 +84,8 @@ Planned commands include:
 
 Read-only inspection is the default. Commands that change live state, including restart or redeploy operations, must be explicitly selected and require confirmation. The CLI will never make a live repair implicitly as a side effect of inspection.
 
+Before the first session file exists, `login` will accept `--url` and `--environment` options. They default to `http://192.168.50.101:9000` and environment ID `2`; successful login stores the selected values with the JWT for later commands.
+
 ## Authentication and Secret Handling
 
 `nightwatchman login` will silently prompt for a Portainer username and password and send them directly to `POST /api/auth`. The password will never be stored and will be removed from process state as soon as practical.
@@ -98,11 +104,11 @@ Nightwatchman polls the Docker API through the socket proxy and evaluates Gluetu
 2. An unhealthy result starts or advances the timer.
 3. Recovery before two continuous minutes cancels remediation and records no failure action.
 4. Two continuous unhealthy minutes trigger remediation unless the ten-minute cooldown is active.
-5. Nightwatchman records the trigger and current target states.
+5. Nightwatchman records the trigger and current target states, persists the attempt time, and starts the ten-minute cooldown immediately.
 6. Nightwatchman stops qBittorrent.
 7. Nightwatchman restarts Gluetun.
 8. Nightwatchman waits up to five minutes for Gluetun to become healthy.
-9. Once Gluetun is healthy, Nightwatchman starts qBittorrent and begins the ten-minute cooldown.
+9. Once Gluetun is healthy, Nightwatchman starts qBittorrent. The cooldown remains measured from the beginning of the attempt.
 10. If Gluetun does not recover, qBittorrent remains stopped and Nightwatchman emits a prominent failure event.
 
 Leaving qBittorrent stopped after a failed VPN recovery is the fail-closed behavior. Although qBittorrent shares Gluetun's namespace, Nightwatchman will not assume that an unhealthy or partially initialized VPN is safe.
@@ -111,7 +117,7 @@ Nightwatchman must cope safely with its own restart. It will inspect actual cont
 
 ## Diagnostic Container Access
 
-The CLI will use Portainer as a gateway to Docker's exec API to create, start, stream, and clean up exec sessions. Interactive shell access and arbitrary commands are allowlisted to the Gluetun and qBittorrent services by default.
+The CLI will use Portainer as a gateway to Docker's exec API to create, start, stream, and clean up exec sessions. Interactive shell access and arbitrary commands are allowlisted to the Gluetun and qBittorrent services by default. qBittorrent console sessions will default to `/bin/bash` as `root`; Gluetun sessions will default to `/bin/sh` as `root` because Bash is not assumed to be installed.
 
 Diagnostic access may inspect:
 
@@ -122,7 +128,38 @@ Diagnostic access may inspect:
 - Health endpoints
 - Application configuration and logs
 
-Interactive shells require explicit confirmation. Diagnostic output will be redacted for known secrets. The CLI will not silently edit files inside containers. Live container changes are ephemeral; durable remediation belongs in this repository and must be deployed through Portainer.
+Every interactive `shell` and arbitrary `exec` invocation requires explicit confirmation because the CLI cannot reliably infer whether a command will mutate state. Named read-only operations such as `logs`, `inspect`, and `health` do not require confirmation. Diagnostic output will be redacted for known secrets. The CLI will not silently edit files inside containers. Live container changes are ephemeral; durable remediation belongs in this repository and must be deployed through Portainer.
+
+## Migration from the Existing Manual Stack
+
+Portainer does not expose a supported conversion from a Web Editor stack to a Git-backed stack. Migration will therefore be a controlled replacement that preserves bind-mounted application data and presents a short planned outage.
+
+### Discovery and backup access
+
+Portainer API and exec operations will capture the existing stack definition, environment variables, container inspections, image identifiers, health state, and logs. Container console diagnostics will use the Portainer exec path described above, not SSH into the containers.
+
+SSH to the Unraid host at `192.168.50.101` as `root` will be used only for host filesystem discovery, backup, ownership checks, and restore. The server's verified ED25519 host-key fingerprint is `SHA256:5c6n415kx1MHa4uN6Ui0fgrG3VxdDiGOP97BR76pX8I`. The user will enter the Unraid root password silently for this operation. The password must not be stored, echoed, included on a command line, written to shell history, or placed in `.env.portainer.local`.
+
+The migration tooling will refuse SSH if the advertised host key does not match the verified fingerprint. Host commands will be auditable and separated into read-only discovery, backup, and later approved mutation phases.
+
+### State that must be preserved
+
+Before changing the live stack, the process will back up and verify the entire qBittorrent config bind mount and record ownership, permissions, size, and a manifest. This includes torrent resume state, preferences, cookies, Web UI username, and `WebUI\Password_PBKDF2`. It will verify the downloads bind mount but will not copy, delete, or rewrite downloaded media as part of stack migration.
+
+The existing Web UI URL, port, image version, configured username, password-hash presence, and login behavior will be recorded. The migration must not delete or reset the password hash. If Web UI authentication is already broken, password recovery is a separate, explicitly approved repair performed only after backup. On qBittorrent 4.6.1 or later, removing an invalid password hash causes a temporary administrator password to be emitted in container logs; that credential must be treated as a secret and replaced through qBittorrent settings.
+
+### Cutover and rollback
+
+After the new Compose model, image, Portainer variables, backups, and rollback inputs have been validated:
+
+1. Stop qBittorrent cleanly and wait for it to exit.
+2. Stop the existing manual stack.
+3. Remove only its Portainer stack record, containers, and project network. Do not remove bind-mounted data or backup artifacts.
+4. Create a Git-backed stack named `vpn-qtorrent` with the same persistent host paths, ports, and qBittorrent application state.
+5. Wait for Gluetun to become healthy before starting or accepting qBittorrent as ready.
+6. Verify from inside qBittorrent that public egress uses the VPN, and verify DNS, Gluetun firewall behavior, Web UI access, stored authentication, torrent state, and download paths.
+
+If a mandatory check fails, stop and remove only the new stack containers/network, then redeploy the captured original Compose definition with its original environment and image references. Restore qBittorrent config from backup only if verification shows the live config was changed or damaged. Every live stop, removal, creation, restore, restart, or redeployment requires separate user authorization immediately before execution.
 
 ## Error Handling
 
@@ -160,6 +197,8 @@ CLI tests will use mocked HTTP and exec-session responses and cover:
 - Exec creation, start, streaming, and cleanup
 - Confirmation requirements for interactive or mutating actions
 - Secret and token redaction
+- SSH host-key pinning and silent password handling
+- Migration discovery, backup manifests, cutover gates, and rollback command generation without executing against a live host
 
 No automated test will target the live Portainer instance. Live verification will begin with read-only API calls. Any restart, redeployment, or other live mutation requires separate user authorization.
 
@@ -174,6 +213,8 @@ The README will document:
 - Read-only inspection and container console workflows
 - Recovery behavior, thresholds, and cooldown
 - Manual rollback
+- Manual-stack-to-Git migration, backup verification, and rollback
+- qBittorrent Web UI credential preservation and separately approved recovery
 - Diagnosing Gluetun without bypassing the VPN
 - Enabling HTTPS for Portainer
 - Image update policy
@@ -200,3 +241,5 @@ The design is implemented successfully when:
 8. The CLI can inspect and open confirmed console sessions in only the two managed containers by default.
 9. Automated tests and Compose validation pass without accessing the live home server.
 10. Documentation explains deployment, security limitations, operation, and rollback.
+11. The manual Portainer stack can be replaced by the Git-backed stack without deleting qBittorrent configuration, torrent state, or downloaded media.
+12. Pre- and post-migration checks verify qBittorrent Web UI authentication state and preserve its configured password hash.
