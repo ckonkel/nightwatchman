@@ -10,6 +10,22 @@ Git-managed Portainer deployment for an existing Gluetun, qBittorrent, and Jacke
 
 It does not automatically change, restart, or redeploy the live stack. Health recovery and Discord alerts are deferred in [TODO.md](TODO.md).
 
+## Current deployment
+
+| Setting | Value |
+| --- | --- |
+| Unraid | `192.168.50.101` |
+| Portainer | `http://192.168.50.101:9000` |
+| Docker environment | `2` (Standalone) |
+| Stack | `vpn-qtorrent` |
+| Git repository | `git@github.com:ckonkel/nightwatchman.git` |
+| Git reference | `refs/heads/develop` |
+| Compose path | `compose.yaml` |
+| qBittorrent Web UI | `http://192.168.50.101:8080` |
+| Jackett Web UI | `http://192.168.50.101:9117` |
+
+Portainer should normally show Gluetun, qBittorrent, and Jackett running. `jackett-indexer-init` and `qbittorrent-search-init` are one-shot services, so **Exited (0)** is their successful steady state.
+
 ## Prerequisites
 
 - Portainer access to the target environment and stack;
@@ -38,6 +54,8 @@ chmod 600 .env
 
 Fill in `.env` locally. It is ignored by Git. Never commit VPN credentials, Portainer tokens, qBittorrent password hashes, or a populated environment file. Rotate any credential that has previously appeared in Compose text, chat, terminal history, or Git.
 
+Path variables contain host paths only. Do not append Compose targets such as `:/config` or `:/downloads`; `compose.yaml` adds those targets.
+
 For Portainer's Git deployment, enter the same variables in the stack's **Environment variables** section instead of committing `.env`. Preserve the live values, especially:
 
 ```text
@@ -54,7 +72,9 @@ PGID=1000
 
 The live qBittorrent port must be verified before deployment: the current environment description reports 8080, while an older repository example used 9081. Preserve the live value rather than changing qBittorrent merely to match this document.
 
-Also set `GLUETUN_IMAGE`, `QBITTORRENT_IMAGE`, `JACKETT_IMAGE`, `VPN_SERVICE_PROVIDER`, `OPENVPN_USER`, `OPENVPN_PASSWORD`, `SERVER_REGIONS`, and `TZ`. Preserve the digest-pinned Gluetun and qBittorrent references reported by discovery when available. Jackett is not in the existing deployment: choose a reviewed LinuxServer Jackett release, resolve its platform-specific digest, and set `JACKETT_IMAGE` to an `image@sha256:digest` reference. Record the release and digest at the deployment gate. Tags in `.env.example` are examples and are mutable, including versioned tags. The Compose file uses current Gluetun names such as `VPN_SERVICE_PROVIDER` and `SERVER_REGIONS`.
+Also set `GLUETUN_IMAGE`, `QBITTORRENT_IMAGE`, `JACKETT_IMAGE`, `VPN_SERVICE_PROVIDER`, `OPENVPN_USER`, `OPENVPN_PASSWORD`, `SERVER_REGIONS`, and `TZ`. Preserve reviewed digest-pinned image references when available. Tags in `.env.example` are examples and are mutable, including versioned tags. The Compose file uses current Gluetun names such as `VPN_SERVICE_PROVIDER` and `SERVER_REGIONS`.
+
+Updating an existing Portainer stack preserves its environment variables. Deleting the Portainer stack removes that Portainer metadata, so retain the complete variable set in the local ignored `.env` or approved secret storage before deletion. Recreating the stack still requires its Git settings and environment variables, but it does not require reconfiguring Jackett, its curated indexers, the qBittorrent plugin, or qBittorrent itself while the bind-mounted appdata directories remain intact.
 
 ## Read-only Portainer discovery
 
@@ -140,7 +160,7 @@ Before requesting or performing a live deployment:
 5. Check whether `/mnt/ssd1tb-asus/appdata/jackett/config` already exists. If it contains data, stop and preserve it rather than overwriting it.
 6. Select a reviewed LinuxServer Jackett release, resolve its platform-specific digest, and record the exact `JACKETT_IMAGE=image@sha256:digest` reference. A tag alone is not an immutable production pin.
 7. On a compatible Docker host, smoke-check the selected image reference before deployment: confirm `curl` and `grep` exist, then confirm the dashboard readiness command accepts unauthenticated, redirect, and authentication-required responses without embedding a credential. Do not substitute this for the post-deployment health check.
-8. Confirm the exact `develop` commit to deploy is available to Portainer. The repository owner performs the push; this project never pushes branches or commits.
+8. Confirm the exact `develop` commit to deploy is pushed and available to Portainer. Repository changes are pushed only after explicit authorization.
 9. Stop qBittorrent during the approved maintenance window and create and verify the complete pre-plugin config backup.
 
 If the current qBittorrent version lacks the required Web UI search behavior, stop. A qBittorrent image upgrade is a separate change requiring its own review and approval.
@@ -159,7 +179,7 @@ Jackett uses a secret-free readiness check against its local dashboard. HTTP suc
 
 ### Automatic public indexers
 
-Before Jackett starts, `jackett-indexer-init` validates YAML-backed entries against the definitions bundled in the pinned Jackett image, records the reviewed built-in Knaben indexer explicitly, and creates only missing indexer configs. It has no network access and never overwrites an existing indexer config. User-added indexers and custom settings therefore survive stack recreation.
+Before Jackett starts, `jackett-indexer-init` validates YAML-backed entries against the definitions bundled in the pinned Jackett image, records the reviewed built-in Knaben indexer explicitly, and creates only missing indexer configs. It has no network access and never overwrites an existing indexer config. User-added indexers and custom settings therefore survive stack recreation. Removing one of the curated indexers in Jackett is temporary: the initializer restores its missing config on the next stack recreation.
 
 The baseline is `1337x`, `eztv`, `knaben`, `limetorrents`, `thepiratebay`, `torrentdownloads`, and `yts`. Adult-only, credentialed, clone, specialist, and less-established definitions are excluded. Individual indexer availability is not tested during startup because an external site failure must not prevent Jackett or qBittorrent from starting. The allowlist has a quarterly review item in [TODO.md](TODO.md).
 
@@ -201,6 +221,14 @@ After configuration, verify all of the following before declaring the deployment
 
 If the plugin search/add workflow fails, disable or remove the plugin and restore its pre-plugin qBittorrent configuration before considering any qBittorrent upgrade.
 
+### Browser-search troubleshooting
+
+- **`Jackett: api key error!`** means qBittorrent loaded the plugin with its placeholder key. Confirm Portainer is using `refs/heads/develop` and `compose.yaml`, pull the latest Git revision, redeploy, and verify `qbittorrent-search-init` exited with code 0. No `JACKETT_API_KEY` Portainer variable is used.
+- **No results and no API-key error** means the plugin configuration loaded. Verify `jackett-indexer-init` exited with code 0, confirm the seven curated indexers appear in Jackett, run each indexer's **Test**, and try Jackett **Manual Search** with a legal term. If Jackett itself returns nothing, the problem is upstream of qBittorrent.
+- **`Unable to retrieve stack file`** usually means Portainer's Git reference or Compose path is wrong. Use `refs/heads/develop` and `compose.yaml` at the repository root.
+- **`bind: cannot assign requested address` for port 9117** means `JACKETT_BIND_IP` is not assigned to Unraid. For this server use `192.168.50.101`, not an example address and not `0.0.0.0`.
+- Do not repeatedly restart the two initializer containers. Redeploy the stack after correcting the underlying Git, image, path, or config issue; successful initializers remain exited with code 0.
+
 ### Back up and upgrade Jackett
 
 Back up `/mnt/ssd1tb-asus/appdata/jackett/config` while Jackett is stopped. Store the backup separately from the appdata directory, record a checksum, and never treat the container filesystem as persistent state.
@@ -220,11 +248,11 @@ To upgrade, review Jackett and LinuxServer release notes, back up Jackett config
 Use a controlled update of the existing `vpn-qtorrent` Git stack during an approved maintenance window:
 
 1. Complete the predeployment gate above and identify the exact local `develop` commit.
-2. The repository owner pushes that revision. Confirm Portainer can read the exact pushed commit before changing the stack.
+2. Push that revision only with explicit authorization. Confirm Portainer can read the exact pushed commit before changing the stack.
 3. Run Portainer discovery and save the artifact outside Git. Record the prior Git revision and full environment-variable set for rollback.
 4. Stop qBittorrent and create the final config backup as described above. Verify its checksum.
-5. Add only `JACKETT_IMAGE`, `JACKETT_PORT`, `JACKETT_BIND_IP`, and `JACKETT_CONFIG_PATH`; preserve all existing variables and bind paths.
-6. Update the stack's Git reference to the approved revision and redeploy it. Do not delete `/mnt/ssd1tb-asus/appdata/vpn-qtorrent/config`, `/mnt/user/media/_inbox`, the backup archive, or an existing Jackett config.
+5. On the first Jackett deployment, add only `JACKETT_IMAGE`, `JACKETT_PORT`, `JACKETT_BIND_IP`, and `JACKETT_CONFIG_PATH`; preserve all existing variables and bind paths. Later redeployments require no new variables for indexer or plugin automation.
+6. Set the Git reference to `refs/heads/develop`, set the Compose path to `compose.yaml`, pull the latest revision, and redeploy. Do not delete `/mnt/ssd1tb-asus/appdata/vpn-qtorrent/config`, `/mnt/ssd1tb-asus/appdata/jackett/config`, `/mnt/user/media/_inbox`, or the backup archive.
 7. Verify Gluetun becomes healthy before qBittorrent and Jackett start, then complete every browser-search verification above.
 8. Revoke the temporary Portainer session with `bin/nightwatchman-portainer logout`.
 
