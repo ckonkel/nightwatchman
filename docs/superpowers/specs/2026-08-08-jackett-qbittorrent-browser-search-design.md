@@ -59,7 +59,7 @@ The LinuxServer qBittorrent image includes Python for search-plugin support, but
 
 - Record the current qBittorrent application and image versions.
 - Confirm the installed version is documented to support Web UI search, the Web UI exposes the Search tab, and its plugin manager is available. If a safe existing search plugin is already configured, a result-download test may also be performed; otherwise that functional test occurs after the Jackett plugin is installed.
-- Confirm port 9117 is unused.
+- Confirm the selected host `${JACKETT_PORT}` is unused.
 - Resolve the discrepancy between the user-reported qBittorrent port 8080 and the older repository example using 9081.
 
 The Jackett plugin and its configuration are runtime application state, not Git-managed Compose data. The plugin uses a `jackett.json` file under qBittorrent's persistent `/config` tree containing the Jackett URL and API key. That file must never be copied into the repository, discovery artifact, test fixture, logs, or documentation.
@@ -68,7 +68,7 @@ After Jackett and its plugin are configured, the mandatory functional test searc
 
 ## Security and Privacy
 
-- Jackett's UI is published only on the Unraid host's trusted-LAN port 9117 and must not be router-forwarded.
+- Jackett's UI is published only on the Unraid host's trusted-LAN `${JACKETT_PORT}` and must not be router-forwarded.
 - Jackett external access requires an admin password before indexers or the API key are configured.
 - The Jackett API key, indexer credentials, cookies, passkeys, qBittorrent credentials, and password hashes remain outside Git.
 - The qBittorrent Jackett plugin stores its API key only in the existing protected qBittorrent config bind.
