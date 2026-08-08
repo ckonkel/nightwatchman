@@ -32,6 +32,80 @@ services:
         max-size: 10m
         max-file: "3"
 
+  jackett-indexer-init:
+    image: ${JACKETT_IMAGE:?required}
+    container_name: jackett-indexer-init
+    restart: "no"
+    network_mode: none
+    environment:
+      JACKETT_CONFIG_ROOT: /config
+      JACKETT_DEFINITIONS_ROOT: /app/Jackett/Definitions
+      JACKETT_BUILTIN_PUBLIC_INDEXERS: knaben
+      JACKETT_PUBLIC_INDEXERS: >-
+        1337x eztv knaben limetorrents thepiratebay torrentdownloads yts
+    entrypoint:
+      - /bin/sh
+      - -euc
+    command:
+      - |
+        config_root="$${JACKETT_CONFIG_ROOT:?}"
+        definitions_root="$${JACKETT_DEFINITIONS_ROOT:?}"
+        indexer_config_dir="$${config_root}/Jackett/Indexers"
+        mkdir -p "$${indexer_config_dir}"
+        created=0
+
+        for indexer_id in $${JACKETT_PUBLIC_INDEXERS:?}; do
+          case "$${indexer_id}" in
+            *[!a-zA-Z0-9_-]*|'')
+              echo "Invalid Jackett indexer ID" >&2
+              exit 1
+              ;;
+          esac
+
+          is_reviewed_builtin=0
+          for builtin_id in $${JACKETT_BUILTIN_PUBLIC_INDEXERS:-}; do
+            if [ "$${indexer_id}" = "$${builtin_id}" ]; then
+              is_reviewed_builtin=1
+              break
+            fi
+          done
+
+          if [ "$${is_reviewed_builtin}" -eq 0 ]; then
+            definition="$${definitions_root}/$${indexer_id}.yml"
+            if [ ! -f "$${definition}" ]; then
+              echo "Jackett definition not found: $${indexer_id}" >&2
+              exit 1
+            fi
+
+            definition_type="$$(awk '$$1 == "type:" { print $$2; exit }' "$${definition}")"
+            definition_language="$$(awk '$$1 == "language:" { print $$2; exit }' "$${definition}")"
+            if [ "$${definition_type}" != "public" ] || [ "$${definition_language}" != "en-US" ]; then
+              echo "Jackett indexer is not a public en-US definition: $${indexer_id}" >&2
+              exit 1
+            fi
+          fi
+
+          config_file="$${indexer_config_dir}/$${indexer_id}.json"
+          if [ -e "$${config_file}" ]; then
+            continue
+          fi
+
+          config_temp="$${config_file}.tmp"
+          printf '[]\n' > "$${config_temp}"
+          chmod 600 "$${config_temp}"
+          mv "$${config_temp}" "$${config_file}"
+          created=$$((created + 1))
+        done
+
+        printf 'Ensured curated Jackett public indexers; created %s missing configs\n' "$${created}"
+    volumes:
+      - ${JACKETT_CONFIG_PATH:?required}:/config
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
   qbittorrent-search-init:
     image: ${QBITTORRENT_IMAGE:?required}
     container_name: qbittorrent-search-init
@@ -166,6 +240,8 @@ services:
     depends_on:
       gluetun:
         condition: service_healthy
+      jackett-indexer-init:
+        condition: service_completed_successfully
     environment:
       PUID: ${PUID:?required}
       PGID: ${PGID:?required}

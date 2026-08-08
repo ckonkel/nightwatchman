@@ -2,7 +2,7 @@
 
 Git-managed Portainer deployment for an existing Gluetun, qBittorrent, and Jackett stack on Unraid. The repository currently provides:
 
-- three long-running services plus a one-shot qBittorrent search bootstrap, all using Gluetun's network;
+- three long-running services plus one-shot indexer and qBittorrent search bootstraps;
 - torrent search in the qBittorrent browser Web UI through the maintained Jackett search plugin;
 - read-only Portainer discovery with a temporary local API session;
 - a fingerprint-pinned SSH backup of the complete qBittorrent config directory; and
@@ -150,12 +150,18 @@ If the current qBittorrent version lacks the required Web UI search behavior, st
 Live deployment requires separate explicit approval. During the approved window:
 
 1. Add `JACKETT_IMAGE`, `JACKETT_PORT`, `JACKETT_BIND_IP`, and `JACKETT_CONFIG_PATH` to the existing Portainer Git stack variables without changing the existing qBittorrent variables or mounts.
-2. Point the stack at the approved `develop` revision and deploy the complete stack. Gluetun starts first, then Jackett, then the one-shot search bootstrap; qBittorrent starts after the bootstrap succeeds.
+2. Point the stack at the approved `develop` revision and deploy the complete stack. The network-isolated indexer bootstrap runs first; Gluetun and Jackett then become healthy before the qBittorrent search bootstrap runs and qBittorrent starts.
 3. If Gluetun is recreated independently, wait for the replacement to become healthy and then **force-recreate** both qBittorrent and Jackett. An ordinary container restart is insufficient because it can retain the removed network namespace.
-4. Open `http://192.168.50.101:JACKETT_PORT` from the trusted LAN, immediately set an admin password before adding indexers, and never expose Jackett directly to the Internet.
-5. Test each configured indexer in Jackett before configuring qBittorrent.
+4. Open `http://192.168.50.101:JACKETT_PORT` from the trusted LAN, immediately set an admin password, and never expose Jackett directly to the Internet.
+5. Confirm the curated indexers appear and test them in Jackett.
 
 Jackett uses a secret-free readiness check against its local dashboard. HTTP success, redirect, and authentication-required responses count as ready; connection failures and server errors do not. Jackett's in-container updater is disabled so the deployed image reference controls upgrades.
+
+### Automatic public indexers
+
+Before Jackett starts, `jackett-indexer-init` validates YAML-backed entries against the definitions bundled in the pinned Jackett image, records the reviewed built-in Knaben indexer explicitly, and creates only missing indexer configs. It has no network access and never overwrites an existing indexer config. User-added indexers and custom settings therefore survive stack recreation.
+
+The baseline is `1337x`, `eztv`, `knaben`, `limetorrents`, `thepiratebay`, `torrentdownloads`, and `yts`. Adult-only, credentialed, clone, specialist, and less-established definitions are excluded. Individual indexer availability is not tested during startup because an external site failure must not prevent Jackett or qBittorrent from starting. The allowlist has a quarterly review item in [TODO.md](TODO.md).
 
 ### Automatic qBittorrent search bootstrap
 
@@ -176,13 +182,14 @@ Deleting and recreating the Portainer stack requires no plugin setup as long as 
 - `CONFIG_PATH` retains qBittorrent and its plugin configuration.
 - `JACKETT_CONFIG_PATH` retains Jackett's API key, password, and indexers.
 
-Deleting either appdata directory is data deletion, not a stack recreation. A brand-new empty Jackett config still requires the initial admin password and indexer setup in the Web UI.
+Deleting either appdata directory is data deletion, not a stack recreation. A brand-new empty Jackett config still requires an initial admin password, but the curated indexers and qBittorrent integration are automatic.
 
 ### Verify browser search
 
 After configuration, verify all of the following before declaring the deployment successful:
 
 - Gluetun is healthy and qBittorrent and Jackett report healthy/running as intended.
+- `jackett-indexer-init` completed successfully with exit code 0.
 - `qbittorrent-search-init` completed successfully with exit code 0.
 - qBittorrent's existing Web UI login, torrent state, categories, `/config`, and `/downloads` still work.
 - Jackett's Web UI authentication and configuration persist after a container restart.
