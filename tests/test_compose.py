@@ -207,6 +207,24 @@ class ComposeContractTest(unittest.TestCase):
         self.assertNotIn(self.test_env["OPENVPN_USER"], combined)
         self.assertNotIn(self.test_env["OPENVPN_PASSWORD"], combined)
 
+    def test_example_env_ends_with_one_contiguous_jackett_block(self):
+        lines = self.example_source.rstrip().splitlines()
+        expected = [
+            "# Jackett",
+            "JACKETT_IMAGE=lscr.io/linuxserver/jackett:latest",
+            "JACKETT_PORT=9117",
+            "JACKETT_BIND_IP=192.168.1.10",
+            "JACKETT_CONFIG_PATH=/path/to/jackett/config",
+        ]
+        self.assertEqual(expected, lines[-len(expected) :])
+        for name in (
+            "JACKETT_IMAGE",
+            "JACKETT_PORT",
+            "JACKETT_BIND_IP",
+            "JACKETT_CONFIG_PATH",
+        ):
+            self.assertEqual(1, sum(line.startswith(name + "=") for line in lines))
+
 
 if __name__ == "__main__":
     unittest.main()
