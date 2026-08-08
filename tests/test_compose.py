@@ -11,6 +11,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 COMPOSE_FILE = ROOT / "compose.yaml"
 EXAMPLE_ENV = ROOT / ".env.example"
 TEST_ENV = ROOT / ".env.test"
+TODO_FILE = ROOT / "TODO.md"
 
 
 def read_env(path):
@@ -43,10 +44,17 @@ class ComposeContractTest(unittest.TestCase):
         cls.test_env = read_env(TEST_ENV)
         cls.compose_source = COMPOSE_FILE.read_text()
         cls.example_source = EXAMPLE_ENV.read_text()
+        cls.todo_source = TODO_FILE.read_text()
 
     def test_stack_has_expected_services_and_images(self):
         self.assertEqual(
-            {"gluetun", "qbittorrent-search-init", "qbittorrent", "jackett"},
+            {
+                "gluetun",
+                "jackett-indexer-init",
+                "qbittorrent-search-init",
+                "qbittorrent",
+                "jackett",
+            },
             set(self.services),
         )
         self.assertEqual(self.test_env["GLUETUN_IMAGE"], self.services["gluetun"]["image"])
@@ -58,6 +66,10 @@ class ComposeContractTest(unittest.TestCase):
             self.services["qbittorrent-search-init"]["image"],
         )
         self.assertEqual(self.test_env["JACKETT_IMAGE"], self.services["jackett"]["image"])
+        self.assertEqual(
+            self.test_env["JACKETT_IMAGE"],
+            self.services["jackett-indexer-init"]["image"],
+        )
 
     def test_gluetun_has_tunnel_permissions_and_device(self):
         gluetun = self.services["gluetun"]
@@ -85,6 +97,7 @@ class ComposeContractTest(unittest.TestCase):
     def test_only_gluetun_publishes_application_and_torrent_ports(self):
         self.assertNotIn("ports", self.services["qbittorrent"])
         self.assertNotIn("ports", self.services["qbittorrent-search-init"])
+        self.assertNotIn("ports", self.services["jackett-indexer-init"])
         self.assertNotIn("ports", self.services["jackett"])
         published = {
             (str(port["target"]), str(port["published"]), port["protocol"])
@@ -143,9 +156,111 @@ class ComposeContractTest(unittest.TestCase):
         jackett = self.services["jackett"]
         self.assertEqual("service:gluetun", jackett["network_mode"])
         self.assertEqual(
-            {"gluetun": {"condition": "service_healthy", "required": True}},
+            {
+                "gluetun": {"condition": "service_healthy", "required": True},
+                "jackett-indexer-init": {
+                    "condition": "service_completed_successfully",
+                    "required": True,
+                },
+            },
             jackett["depends_on"],
         )
+
+    def test_indexer_init_is_network_isolated_and_uses_curated_allowlist(self):
+        init = self.services["jackett-indexer-init"]
+        self.assertEqual("none", init["network_mode"])
+        self.assertNotIn("depends_on", init)
+        self.assertEqual(["/bin/sh", "-euc"], init["entrypoint"])
+        self.assertEqual(
+            {
+                "JACKETT_CONFIG_ROOT": "/config",
+                "JACKETT_DEFINITIONS_ROOT": "/app/Jackett/Definitions",
+                "JACKETT_BUILTIN_PUBLIC_INDEXERS": "knaben",
+                "JACKETT_PUBLIC_INDEXERS": (
+                    "1337x eztv knaben limetorrents thepiratebay torrentdownloads yts"
+                ),
+            },
+            init["environment"],
+        )
+        mounts = {volume["target"]: volume["source"] for volume in init["volumes"]}
+        self.assertEqual({"/config": self.test_env["JACKETT_CONFIG_PATH"]}, mounts)
+
+    def test_indexer_init_seeds_missing_configs_and_preserves_existing_configs(self):
+        init = self.services["jackett-indexer-init"]
+        script = init["command"][0].replace("$$", "$")
+        indexer_ids = init["environment"]["JACKETT_PUBLIC_INDEXERS"].split()
+        builtin_ids = init["environment"]["JACKETT_BUILTIN_PUBLIC_INDEXERS"].split()
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            definitions = root / "definitions"
+            configs = root / "config" / "Jackett" / "Indexers"
+            definitions.mkdir()
+            configs.mkdir(parents=True)
+            for indexer_id in indexer_ids:
+                if indexer_id in builtin_ids:
+                    continue
+                (definitions / f"{indexer_id}.yml").write_text(
+                    f"---\nid: {indexer_id}\nlanguage: en-US\ntype: public\n",
+                    encoding="utf-8",
+                )
+
+            existing = configs / "1337x.json"
+            existing_contents = '[{"id":"custom","value":"preserve"}]\n'
+            existing.write_text(existing_contents, encoding="utf-8")
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "JACKETT_CONFIG_ROOT": str(root / "config"),
+                    "JACKETT_DEFINITIONS_ROOT": str(definitions),
+                    "JACKETT_BUILTIN_PUBLIC_INDEXERS": " ".join(builtin_ids),
+                    "JACKETT_PUBLIC_INDEXERS": " ".join(indexer_ids),
+                }
+            )
+
+            for _ in range(2):
+                result = subprocess.run(
+                    ["/bin/sh", "-euc", script],
+                    text=True,
+                    capture_output=True,
+                    env=environment,
+                )
+                self.assertEqual(0, result.returncode, result.stderr)
+
+            self.assertEqual(existing_contents, existing.read_text(encoding="utf-8"))
+            for indexer_id in indexer_ids[1:]:
+                self.assertEqual(
+                    "[]\n",
+                    (configs / f"{indexer_id}.json").read_text(encoding="utf-8"),
+                )
+
+    def test_indexer_init_rejects_non_public_or_non_english_definitions(self):
+        init = self.services["jackett-indexer-init"]
+        script = init["command"][0].replace("$$", "$")
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            definitions = root / "definitions"
+            definitions.mkdir()
+            (definitions / "example.yml").write_text(
+                "---\nid: example\nlanguage: en-US\ntype: private\n",
+                encoding="utf-8",
+            )
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "JACKETT_CONFIG_ROOT": str(root / "config"),
+                    "JACKETT_DEFINITIONS_ROOT": str(definitions),
+                    "JACKETT_BUILTIN_PUBLIC_INDEXERS": "",
+                    "JACKETT_PUBLIC_INDEXERS": "example",
+                }
+            )
+            result = subprocess.run(
+                ["/bin/sh", "-euc", script],
+                text=True,
+                capture_output=True,
+                env=environment,
+            )
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn("not a public en-US definition", result.stderr)
 
     def test_qbittorrent_environment_has_identity_timezone_and_ports(self):
         environment = self.services["qbittorrent"]["environment"]
@@ -302,10 +417,14 @@ class ComposeContractTest(unittest.TestCase):
             "qbittorrent-search-init",
             self.services["qbittorrent-search-init"]["container_name"],
         )
+        self.assertEqual(
+            "jackett-indexer-init",
+            self.services["jackett-indexer-init"]["container_name"],
+        )
         self.assertEqual("qBittorrent", self.services["qbittorrent"]["container_name"])
         self.assertEqual("jackett", self.services["jackett"]["container_name"])
         for name, service in self.services.items():
-            if name == "qbittorrent-search-init":
+            if name in {"qbittorrent-search-init", "jackett-indexer-init"}:
                 self.assertEqual("no", service["restart"])
                 continue
             self.assertEqual("unless-stopped", service["restart"])
@@ -345,6 +464,12 @@ class ComposeContractTest(unittest.TestCase):
             "JACKETT_CONFIG_PATH",
         ):
             self.assertEqual(1, sum(line.startswith(name + "=") for line in lines))
+
+    def test_todo_tracks_curated_indexer_review(self):
+        self.assertIn(
+            "Review the curated Jackett public-indexer allowlist quarterly",
+            self.todo_source,
+        )
 
 
 if __name__ == "__main__":
