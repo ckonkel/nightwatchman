@@ -31,6 +31,7 @@ Append to `.env.test`:
 ```dotenv
 JACKETT_IMAGE=ghcr.io/example/jackett:test
 JACKETT_PORT=19117
+JACKETT_BIND_IP=192.0.2.10
 JACKETT_CONFIG_PATH=/tmp/nightwatchman-test/jackett-config
 ```
 
@@ -80,7 +81,7 @@ Require `CMD-SHELL`, a bounded localhost request to `/UI/Dashboard`, accepted 2x
 
 - [ ] **Step 6: Extend required-variable and preservation assertions**
 
-Require `${JACKETT_IMAGE:?required}`, `${JACKETT_PORT:?required}`, and `${JACKETT_CONFIG_PATH:?required}` in Compose. Preserve exact existing qBittorrent environment and mount assertions. Keep `.env.example` free of `/mnt/` and keep test credentials absent from tracked source.
+Require `${JACKETT_IMAGE:?required}`, `${JACKETT_PORT:?required}`, `${JACKETT_BIND_IP:?required}`, and `${JACKETT_CONFIG_PATH:?required}` in Compose. Assert that Jackett's published port uses the configured host IP. Preserve exact existing qBittorrent environment and mount assertions. Keep `.env.example` free of `/mnt/` and keep test credentials absent from tracked source.
 
 - [ ] **Step 7: Run the focused test and verify RED**
 
@@ -105,10 +106,11 @@ Add:
 ```dotenv
 JACKETT_IMAGE=lscr.io/linuxserver/jackett:latest
 JACKETT_PORT=9117
+JACKETT_BIND_IP=192.168.1.10
 JACKETT_CONFIG_PATH=/path/to/jackett/config
 ```
 
-Document that `latest` is an example only and Portainer must receive a concrete reviewed stable immutable tag or digest recorded at the deployment gate.
+Document that `latest` is an example only and Portainer must receive a reviewed platform-specific `image@sha256:digest` reference recorded at the deployment gate; tags alone are mutable.
 
 - [ ] **Step 2: Publish Jackett's fixed internal port through Gluetun**
 
@@ -117,6 +119,7 @@ Add to `gluetun.ports`:
 ```yaml
 - target: 9117
   published: ${JACKETT_PORT:?required}
+  host_ip: ${JACKETT_BIND_IP:?required}
   protocol: tcp
 ```
 
@@ -185,10 +188,11 @@ git commit -m "feat: add VPN-routed Jackett service"
 
 - [ ] **Step 1: Update repository and variable descriptions**
 
-Change the overview from two services to three and add `JACKETT_IMAGE`, `JACKETT_PORT`, and `JACKETT_CONFIG_PATH`. Use the intended live path only in the operator runbook block:
+Change the overview from two services to three and add `JACKETT_IMAGE`, `JACKETT_PORT`, `JACKETT_BIND_IP`, and `JACKETT_CONFIG_PATH`. Use the intended live values only in the operator runbook block:
 
 ```text
 JACKETT_PORT=9117
+JACKETT_BIND_IP=192.168.50.101
 JACKETT_CONFIG_PATH=/mnt/ssd1tb-asus/appdata/jackett/config
 ```
 
@@ -196,25 +200,27 @@ Explicitly call out that the reported qBittorrent port 8080 must be reconciled w
 
 - [ ] **Step 2: Add a predeployment gate**
 
-Document read-only checks for current image/application versions, exact Git revision, complete Portainer variable backup, unused selected Jackett host port, qBittorrent Web UI Search tab/plugin manager, Python support, existing Jackett config, and immutable Jackett image selection.
+Document read-only checks for current image/application versions, exact Git revision, complete Portainer variable backup, the trusted-LAN Jackett bind and unused host port, qBittorrent Web UI Search tab/plugin manager, Python support, existing Jackett config, and a digest-pinned Jackett image plus readiness-dependency smoke check.
 
 - [ ] **Step 3: Add deployment and first-run Jackett steps**
 
-Document that deployment is not performed by offline tests and requires explicit approval. State that `${JACKETT_PORT}` remains LAN-only with no router forwarding. During an approved maintenance window: stop qBittorrent, make/verify its existing config backup, update Portainer variables and Git revision, deploy the full stack, wait for Gluetun then Jackett/qBittorrent health, and configure a Jackett admin password before adding indexers.
+Document that deployment is not performed by offline tests and requires explicit approval. State that `${JACKETT_BIND_IP}:${JACKETT_PORT}` remains LAN-only with no router forwarding. During an approved maintenance window: stop qBittorrent, make/verify its existing config backup, update Portainer variables and Git revision, deploy the full stack, wait for Gluetun then Jackett/qBittorrent health, and configure a Jackett admin password before adding indexers.
 
 - [ ] **Step 4: Add qBittorrent browser-plugin integration**
 
 Document installing only the maintained plugin URL:
 
 ```text
-https://raw.githubusercontent.com/qbittorrent/search-plugins/master/nova3/engines/jackett.py
+https://raw.githubusercontent.com/qbittorrent/search-plugins/fa0be6abdc47b8622e8ec71a0d4427d9a7770eab/nova3/engines/jackett.py
 ```
+
+Record plugin version 4.9 and SHA-256 `04edbb791fbcf870fe61d9f476adff3115c32900d8e24dcfa66381cc1649ed9d`; updates require reviewing and checksumming a new commit-pinned source.
 
 Configure its runtime `jackett.json` with `url` set to `http://127.0.0.1:9117` and the API key copied locally from Jackett. Show placeholders only, state that `jackett.json` stays under the protected qBittorrent `/config` bind, and prohibit copying its content into Git, chat, logs, tests, or discovery artifacts.
 
 - [ ] **Step 5: Add verification, backup, upgrade, and rollback procedures**
 
-Verification must cover container health, both Web UIs, persistent Jackett config, a legal indexer/search test, direct add to qBittorrent, PIA egress from Jackett's shared namespace, existing qBittorrent state/mounts, and Gluetun-recreation restart behavior.
+Verification must cover container health, both Web UIs, persistent Jackett config, a legal indexer/search test, direct add to qBittorrent, PIA egress from Jackett's shared namespace, existing qBittorrent state/mounts, and force-recreation of both dependent services after Gluetun replacement.
 
 Backup/upgrade/rollback must cover stopping Jackett for config backup, disabling in-container auto-update, changing only reviewed image references, preserving bind data, removing/disabling the plugin, and redeploying the exact prior Git revision plus its saved Portainer variables.
 
@@ -223,7 +229,7 @@ Backup/upgrade/rollback must cover stopping Jackett for config backup, disabling
 Run:
 
 ```bash
-rg -n "JACKETT_(IMAGE|PORT|CONFIG_PATH)|127\.0\.0\.1:9117|jackett\.py|Backup|Upgrade|Rollback" README.md
+rg -n "JACKETT_(IMAGE|PORT|BIND_IP|CONFIG_PATH)|127\.0\.0\.1:9117|jackett\.py|Backup|Upgrade|Rollback" README.md
 ! rg -n "(api_key|password)\"?[[:space:]]*[:=][[:space:]]*\"?[A-Za-z0-9_-]{20,}" README.md .env.example compose.yaml
 git diff --check
 ```

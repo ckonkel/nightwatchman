@@ -96,6 +96,12 @@ class ComposeContractTest(unittest.TestCase):
             },
             published,
         )
+        jackett_port = next(
+            port
+            for port in self.services["gluetun"]["ports"]
+            if str(port["target"]) == "9117"
+        )
+        self.assertEqual(self.test_env["JACKETT_BIND_IP"], jackett_port["host_ip"])
 
     def test_qbittorrent_shares_gluetun_network_and_waits_for_health(self):
         qbittorrent = self.services["qbittorrent"]
@@ -192,6 +198,7 @@ class ComposeContractTest(unittest.TestCase):
             "DOWNLOADS_PATH",
             "JACKETT_IMAGE",
             "JACKETT_PORT",
+            "JACKETT_BIND_IP",
             "JACKETT_CONFIG_PATH",
         ):
             self.assertIn("${" + name + ":?required}", self.compose_source)

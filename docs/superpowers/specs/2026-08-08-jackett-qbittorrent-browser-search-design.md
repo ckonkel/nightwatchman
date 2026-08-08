@@ -42,16 +42,17 @@ Jackett supplies search results. It does not replace qBittorrent and does not re
 - The same bounded `json-file` logging policy as the existing services.
 - A bounded, secret-free HTTP readiness check against Jackett on localhost. It requests `/UI/Dashboard` without credentials and treats an HTTP 2xx/3xx/401/403 response as ready; connection failures, timeouts, status 000, and 5xx responses fail. This remains valid before and after an admin password is configured.
 
-Gluetun maps Jackett's fixed container port 9117 to the required host-published `${JACKETT_PORT}` TCP port. `JACKETT_PORT` controls only the LAN-facing host port; the qBittorrent plugin always uses `http://127.0.0.1:9117` inside the shared namespace. Jackett declares no ports of its own because Compose forbids port publishing with service network mode.
+Gluetun maps Jackett's fixed container port 9117 to the required host-published `${JACKETT_PORT}` TCP port on required `${JACKETT_BIND_IP}`. `JACKETT_BIND_IP` must be Unraid's trusted-LAN address rather than a wildcard bind. `JACKETT_PORT` controls only the LAN-facing host port; the qBittorrent plugin always uses `http://127.0.0.1:9117` inside the shared namespace. Jackett declares no ports of its own because Compose forbids port publishing with service network mode.
 
 The default live values will be documented as:
 
 ```text
 JACKETT_PORT=9117
+JACKETT_BIND_IP=192.168.50.101
 JACKETT_CONFIG_PATH=/mnt/ssd1tb-asus/appdata/jackett/config
 ```
 
-The existing stack cannot supply a Jackett image through discovery because Jackett is not deployed yet. The deployable LinuxServer tag or digest will instead be selected from the official image registry/release metadata, reviewed during implementation, and recorded before deployment. No floating or invented version will be silently substituted for the approved value.
+The existing stack cannot supply a Jackett image through discovery because Jackett is not deployed yet. A LinuxServer release will instead be selected from official registry/release metadata, resolved to its platform-specific digest, reviewed during implementation, and recorded as an `image@sha256:digest` reference before deployment. No tag-only, floating, or invented version will be silently substituted for the approved value.
 
 ## qBittorrent Compatibility and Plugin State
 
@@ -59,7 +60,8 @@ The LinuxServer qBittorrent image includes Python for search-plugin support, but
 
 - Record the current qBittorrent application and image versions.
 - Confirm the installed version is documented to support Web UI search, the Web UI exposes the Search tab, and its plugin manager is available. If a safe existing search plugin is already configured, a result-download test may also be performed; otherwise that functional test occurs after the Jackett plugin is installed.
-- Confirm the selected host `${JACKETT_PORT}` is unused.
+- Confirm `${JACKETT_BIND_IP}` is the Unraid trusted-LAN address and the selected host `${JACKETT_PORT}` is unused.
+- Resolve the reviewed LinuxServer release to a platform-specific digest, use an `image@sha256:digest` reference, and smoke-check that image for the `curl`/`grep` readiness dependencies before deployment.
 - Resolve the discrepancy between the user-reported qBittorrent port 8080 and the older repository example using 9081.
 
 The Jackett plugin and its configuration are runtime application state, not Git-managed Compose data. The plugin uses a `jackett.json` file under qBittorrent's persistent `/config` tree containing the Jackett URL and API key. That file must never be copied into the repository, discovery artifact, test fixture, logs, or documentation.
@@ -68,7 +70,7 @@ After Jackett and its plugin are configured, the mandatory functional test searc
 
 ## Security and Privacy
 
-- Jackett's UI is published only on the Unraid host's trusted-LAN `${JACKETT_PORT}` and must not be router-forwarded.
+- Jackett's UI is published only on the required Unraid trusted-LAN `${JACKETT_BIND_IP}:${JACKETT_PORT}` and must not be router-forwarded.
 - Jackett external access requires an admin password before indexers or the API key are configured.
 - The Jackett API key, indexer credentials, cookies, passkeys, qBittorrent credentials, and password hashes remain outside Git.
 - The qBittorrent Jackett plugin stores its API key only in the existing protected qBittorrent config bind.
@@ -96,21 +98,21 @@ Jackett's in-container updater stays disabled. An upgrade consists of:
 
 1. Back up Jackett config.
 2. Review upstream and LinuxServer release notes.
-3. Update `JACKETT_IMAGE` to a reviewed immutable reference.
+3. Resolve the reviewed release's platform-specific digest and update `JACKETT_IMAGE` to an `image@sha256:digest` reference; tags alone are mutable.
 4. Render and validate Compose offline.
 5. Redeploy the stack during an approved window.
 6. Verify health, UI authentication, indexer tests, qBittorrent search, VPN egress, and restart behavior.
 
-The qBittorrent Jackett plugin is updated independently through qBittorrent's plugin manager after its source is reviewed. Plugin updates must preserve the local `jackett.json` configuration.
+The qBittorrent Jackett plugin is installed from a reviewed commit-pinned upstream URL with its SHA-256 checksum recorded in the runbook. It is updated independently through qBittorrent's plugin manager only after the new source and checksum are reviewed. Plugin updates must preserve the local `jackett.json` configuration.
 
 ## Failure Behavior and Rollback
 
 - Jackett failure: qBittorrent search returns no Jackett results; existing torrents and downloads continue.
 - Indexer failure: only that indexer's test/search fails; qBittorrent remains operational.
 - VPN tunnel failure: Gluetun blocks Jackett and qBittorrent external traffic. LAN UI behavior may remain available while Gluetun is running, but no successful external search or download is expected.
-- Gluetun container loss: both namespace-sharing services lose their network dependency and are restarted after Gluetun is restored healthy.
+- Gluetun container loss: both namespace-sharing services lose their network dependency and are force-recreated after Gluetun is restored healthy.
 
-Whenever Gluetun is recreated, both namespace-sharing services are recreated or restarted after the replacement Gluetun reports healthy. The full-stack Compose deployment is the normal mechanism; qBittorrent and Jackett must not be left attached to the removed namespace.
+Whenever Gluetun is recreated, both namespace-sharing services are force-recreated after the replacement Gluetun reports healthy. An ordinary restart is insufficient because it can retain the removed namespace. The full-stack Compose deployment is the normal mechanism; qBittorrent and Jackett must not be left attached to the removed namespace.
 
 Rollback removes or disables the qBittorrent Jackett plugin, then redeploys the exact previously recorded Git revision with its prior Portainer environment-variable set and image references. That revision removes the Jackett service and Gluetun's 9117 publication. The Jackett config directory is retained until rollback is verified. The existing qBittorrent config/download binds are never deleted or replaced. If plugin installation altered qBittorrent state unexpectedly, restore the verified predeployment qBittorrent config backup while qBittorrent is stopped.
 

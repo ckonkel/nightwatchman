@@ -24,6 +24,7 @@ services:
         protocol: udp
       - target: 9117
         published: ${JACKETT_PORT:?required}
+        host_ip: ${JACKETT_BIND_IP:?required}
         protocol: tcp
     logging:
       driver: json-file
