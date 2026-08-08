@@ -1,0 +1,53 @@
+services:
+  gluetun:
+    image: ${GLUETUN_IMAGE:?required}
+    container_name: gluetun
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      VPN_SERVICE_PROVIDER: ${VPN_SERVICE_PROVIDER:?required}
+      OPENVPN_USER: ${OPENVPN_USER:?required}
+      OPENVPN_PASSWORD: ${OPENVPN_PASSWORD:?required}
+      SERVER_REGIONS: ${SERVER_REGIONS:?required}
+    ports:
+      - target: ${WEBUI_PORT:?required}
+        published: ${WEBUI_PORT:?required}
+        protocol: tcp
+      - target: ${TORRENTING_PORT:?required}
+        published: ${TORRENTING_PORT:?required}
+        protocol: tcp
+      - target: ${TORRENTING_PORT:?required}
+        published: ${TORRENTING_PORT:?required}
+        protocol: udp
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  qbittorrent:
+    image: ${QBITTORRENT_IMAGE:?required}
+    container_name: qBittorrent
+    restart: unless-stopped
+    stop_grace_period: 30s
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    environment:
+      WEBUI_PORT: ${WEBUI_PORT:?required}
+      TORRENTING_PORT: ${TORRENTING_PORT:?required}
+      PUID: ${PUID:?required}
+      PGID: ${PGID:?required}
+      TZ: ${TZ:?required}
+    volumes:
+      - ${CONFIG_PATH:?required}:/config
+      - ${DOWNLOADS_PATH:?required}:/downloads
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"

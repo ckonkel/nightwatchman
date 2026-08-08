@@ -1,1 +1,6 @@
 .worktrees/
+.env
+.env.portainer.local
+.nightwatchman/
+__pycache__/
+*.py[cod]
