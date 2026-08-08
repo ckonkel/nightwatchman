@@ -24,7 +24,7 @@ Portainer stack environment variables will supply secrets and host-specific path
 `compose.yaml` will define four services:
 
 1. `gluetun` establishes the VPN, owns the shared network namespace, publishes the qBittorrent Web UI and peer ports, and exposes its Docker health state.
-2. `qbittorrent` shares `gluetun`'s network namespace and therefore has no independent route around the VPN.
+2. `qbittorrent` shares `gluetun`'s network namespace and therefore has no independent route around the VPN. Its Compose dependency requires Gluetun's health check to pass before qBittorrent starts.
 3. `docker-socket-proxy` exposes only the Docker API capabilities Nightwatchman needs instead of mounting the raw Docker socket into Nightwatchman.
 4. `nightwatchman` observes Gluetun health and executes the approved recovery state machine.
 
@@ -144,22 +144,29 @@ The migration tooling will refuse SSH if the advertised host key does not match 
 
 ### State that must be preserved
 
-Before changing the live stack, the process will back up and verify the entire qBittorrent config bind mount and record ownership, permissions, size, and a manifest. This includes torrent resume state, preferences, cookies, Web UI username, and `WebUI\Password_PBKDF2`. It will verify the downloads bind mount but will not copy, delete, or rewrite downloaded media as part of stack migration.
+During read-only discovery, the process may create a preliminary backup of the entire qBittorrent config bind mount and record ownership, permissions, size, and a manifest. This includes torrent resume state, preferences, cookies, Web UI username, and `WebUI\Password_PBKDF2`. Because qBittorrent can change these files while running, this preliminary copy is not an authoritative rollback artifact. It will verify the downloads bind mount but will not copy, delete, or rewrite downloaded media as part of stack migration.
+
+Immediately after qBittorrent stops cleanly and before the old stack is removed, the process will create and verify a final offline config backup. That final backup and its checksum manifest are the authoritative restore point. Cutover cannot continue if qBittorrent does not stop cleanly, the backup fails, checksums fail, or the source changes during final verification.
+
+The user will provide a dedicated Unraid backup path outside the active qBittorrent config directory. Backup directories will be owned by root with mode `0700`, and files containing configuration, manifests, stack environment, or credentials will use mode `0600`. Sensitive rollback material will never enter Git or command output. Backups will remain until post-migration verification succeeds and the user separately approves cleanup; the tooling will not delete them automatically.
 
 The existing Web UI URL, port, image version, configured username, password-hash presence, and login behavior will be recorded. The migration must not delete or reset the password hash. If Web UI authentication is already broken, password recovery is a separate, explicitly approved repair performed only after backup. On qBittorrent 4.6.1 or later, removing an invalid password hash causes a temporary administrator password to be emitted in container logs; that credential must be treated as a secret and replaced through qBittorrent settings.
 
 ### Cutover and rollback
 
-After the new Compose model, image, Portainer variables, backups, and rollback inputs have been validated:
+Before cutover, the captured legacy stack will be converted into a rollback bundle that preserves its effective service configuration, current image identifiers, environment, ports, mounts, and network relationship while fixing serialization errors that would prevent redeployment. The bundle will be rendered with its required environment and validated using Docker Compose without starting containers. A rollback dry run must resolve the expected services, mounts, ports, and images. Destructive cutover cannot begin until this deployable rollback bundle and its protected environment file pass validation.
+
+After the new Compose model, image, Portainer variables, preliminary discovery, and rollback inputs have been validated:
 
 1. Stop qBittorrent cleanly and wait for it to exit.
-2. Stop the existing manual stack.
-3. Remove only its Portainer stack record, containers, and project network. Do not remove bind-mounted data or backup artifacts.
-4. Create a Git-backed stack named `vpn-qtorrent` with the same persistent host paths, ports, and qBittorrent application state.
-5. Wait for Gluetun to become healthy before starting or accepting qBittorrent as ready.
-6. Verify from inside qBittorrent that public egress uses the VPN, and verify DNS, Gluetun firewall behavior, Web UI access, stored authentication, torrent state, and download paths.
+2. Create and verify the authoritative offline qBittorrent config backup and final manifest.
+3. Stop the remaining existing manual stack services.
+4. Remove only its Portainer stack record, containers, and project network. Do not remove bind-mounted data or backup artifacts.
+5. Create a Git-backed stack named `vpn-qtorrent` with the same persistent host paths, ports, and qBittorrent application state.
+6. Enforce the Compose health dependency so qBittorrent does not start until Gluetun is healthy.
+7. Verify from inside qBittorrent that public egress uses the VPN, and verify DNS, Gluetun firewall behavior, Web UI access, stored authentication, torrent state, and download paths.
 
-If a mandatory check fails, stop and remove only the new stack containers/network, then redeploy the captured original Compose definition with its original environment and image references. Restore qBittorrent config from backup only if verification shows the live config was changed or damaged. Every live stop, removal, creation, restore, restart, or redeployment requires separate user authorization immediately before execution.
+If a mandatory check fails, stop and remove only the new stack containers/network, then redeploy the prevalidated rollback bundle with its protected environment and pinned original image references. Restore qBittorrent config from the authoritative offline backup only if verification shows the live config was changed or damaged. Every live stop, removal, creation, restore, restart, or redeployment requires separate user authorization immediately before execution.
 
 ## Error Handling
 
