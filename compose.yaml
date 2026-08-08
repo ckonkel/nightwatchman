@@ -32,6 +32,106 @@ services:
         max-size: 10m
         max-file: "3"
 
+  qbittorrent-search-init:
+    image: ${QBITTORRENT_IMAGE:?required}
+    container_name: qbittorrent-search-init
+    restart: "no"
+    network_mode: service:gluetun
+    depends_on:
+      gluetun:
+        condition: service_healthy
+      jackett:
+        condition: service_healthy
+    environment:
+      JACKETT_PLUGIN_URL: https://raw.githubusercontent.com/qbittorrent/search-plugins/fa0be6abdc47b8622e8ec71a0d4427d9a7770eab/nova3/engines/jackett.py
+      JACKETT_PLUGIN_SHA256: 04edbb791fbcf870fe61d9f476adff3115c32900d8e24dcfa66381cc1649ed9d
+      QBITTORRENT_CONFIG_ROOT: /config
+      JACKETT_CONFIG_ROOT: /jackett-config
+    entrypoint:
+      - python3
+      - -c
+    command:
+      - |
+        import hashlib
+        import hmac
+        import json
+        import os
+        from pathlib import Path
+        from urllib.request import urlopen
+
+        jackett_root = Path(os.environ["JACKETT_CONFIG_ROOT"])
+        preferred_configs = (
+            jackett_root / "Jackett" / "ServerConfig.json",
+            jackett_root / "ServerConfig.json",
+        )
+        server_config_path = next(
+            (path for path in preferred_configs if path.is_file()), None
+        )
+        if server_config_path is None:
+            matches = list(jackett_root.rglob("ServerConfig.json"))
+            if len(matches) != 1:
+                raise SystemExit("Unable to locate one Jackett ServerConfig.json")
+            server_config_path = matches[0]
+
+        server_config = json.loads(server_config_path.read_text(encoding="utf-8"))
+        if not isinstance(server_config, dict):
+            raise SystemExit("Jackett ServerConfig.json must contain a JSON object")
+        api_key = str(server_config.get("APIKey", "")).strip()
+        if len(api_key) < 16 or any(character.isspace() for character in api_key):
+            raise SystemExit("Jackett ServerConfig.json has no valid APIKey")
+
+        plugin_url = os.environ["JACKETT_PLUGIN_URL"]
+        expected_sha256 = os.environ["JACKETT_PLUGIN_SHA256"].lower()
+        config_root = Path(os.environ["QBITTORRENT_CONFIG_ROOT"])
+        engines = config_root / "qBittorrent" / "nova3" / "engines"
+        config_path = engines / "jackett.json"
+        plugin_path = engines / "jackett.py"
+
+        settings = {"tracker_first": False, "thread_count": 20}
+        if config_path.exists():
+            loaded = json.loads(config_path.read_text(encoding="utf-8"))
+            if not isinstance(loaded, dict):
+                raise SystemExit("Existing jackett.json must contain a JSON object")
+            settings.update(loaded)
+        settings.update({"api_key": api_key, "url": "http://127.0.0.1:9117"})
+
+        engines.mkdir(parents=True, exist_ok=True)
+        plugin_is_current = False
+        if plugin_path.is_file():
+            current_sha256 = hashlib.sha256(plugin_path.read_bytes()).hexdigest()
+            plugin_is_current = hmac.compare_digest(current_sha256, expected_sha256)
+
+        if not plugin_is_current:
+            with urlopen(plugin_url, timeout=20) as response:
+                plugin = response.read(262145)
+            if len(plugin) > 262144:
+                raise SystemExit("Jackett plugin download exceeded 256 KiB")
+            actual_sha256 = hashlib.sha256(plugin).hexdigest()
+            if not hmac.compare_digest(actual_sha256, expected_sha256):
+                raise SystemExit("Jackett plugin checksum verification failed")
+
+            plugin_temp = engines / ".jackett.py.tmp"
+            plugin_temp.write_bytes(plugin)
+            plugin_temp.chmod(0o644)
+            plugin_temp.replace(plugin_path)
+
+        config_temp = engines / ".jackett.json.tmp"
+        config_temp.write_text(
+            json.dumps(settings, indent=4, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        config_temp.chmod(0o600)
+        config_temp.replace(config_path)
+        print("Installed verified qBittorrent Jackett search configuration")
+    volumes:
+      - ${CONFIG_PATH:?required}:/config
+      - ${JACKETT_CONFIG_PATH:?required}:/jackett-config:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
   qbittorrent:
     image: ${QBITTORRENT_IMAGE:?required}
     container_name: qBittorrent
@@ -41,6 +141,8 @@ services:
     depends_on:
       gluetun:
         condition: service_healthy
+      qbittorrent-search-init:
+        condition: service_completed_successfully
     environment:
       WEBUI_PORT: ${WEBUI_PORT:?required}
       TORRENTING_PORT: ${TORRENTING_PORT:?required}

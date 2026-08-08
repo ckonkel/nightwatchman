@@ -1,6 +1,9 @@
+import hashlib
 import json
+import os
 import pathlib
 import subprocess
+import tempfile
 import unittest
 
 
@@ -41,11 +44,18 @@ class ComposeContractTest(unittest.TestCase):
         cls.compose_source = COMPOSE_FILE.read_text()
         cls.example_source = EXAMPLE_ENV.read_text()
 
-    def test_stack_has_exactly_three_expected_services_and_images(self):
-        self.assertEqual({"gluetun", "qbittorrent", "jackett"}, set(self.services))
+    def test_stack_has_expected_services_and_images(self):
+        self.assertEqual(
+            {"gluetun", "qbittorrent-search-init", "qbittorrent", "jackett"},
+            set(self.services),
+        )
         self.assertEqual(self.test_env["GLUETUN_IMAGE"], self.services["gluetun"]["image"])
         self.assertEqual(
             self.test_env["QBITTORRENT_IMAGE"], self.services["qbittorrent"]["image"]
+        )
+        self.assertEqual(
+            self.test_env["QBITTORRENT_IMAGE"],
+            self.services["qbittorrent-search-init"]["image"],
         )
         self.assertEqual(self.test_env["JACKETT_IMAGE"], self.services["jackett"]["image"])
 
@@ -74,6 +84,7 @@ class ComposeContractTest(unittest.TestCase):
 
     def test_only_gluetun_publishes_application_and_torrent_ports(self):
         self.assertNotIn("ports", self.services["qbittorrent"])
+        self.assertNotIn("ports", self.services["qbittorrent-search-init"])
         self.assertNotIn("ports", self.services["jackett"])
         published = {
             (str(port["target"]), str(port["published"]), port["protocol"])
@@ -107,8 +118,25 @@ class ComposeContractTest(unittest.TestCase):
         qbittorrent = self.services["qbittorrent"]
         self.assertEqual("service:gluetun", qbittorrent["network_mode"])
         self.assertEqual(
-            {"gluetun": {"condition": "service_healthy", "required": True}},
+            {
+                "gluetun": {"condition": "service_healthy", "required": True},
+                "qbittorrent-search-init": {
+                    "condition": "service_completed_successfully",
+                    "required": True,
+                },
+            },
             qbittorrent["depends_on"],
+        )
+
+    def test_search_init_shares_gluetun_and_waits_for_health(self):
+        init = self.services["qbittorrent-search-init"]
+        self.assertEqual("service:gluetun", init["network_mode"])
+        self.assertEqual(
+            {
+                "gluetun": {"condition": "service_healthy", "required": True},
+                "jackett": {"condition": "service_healthy", "required": True},
+            },
+            init["depends_on"],
         )
 
     def test_jackett_shares_gluetun_network_and_waits_for_health(self):
@@ -155,6 +183,92 @@ class ComposeContractTest(unittest.TestCase):
         }
         self.assertEqual({"/config": self.test_env["JACKETT_CONFIG_PATH"]}, mounts)
 
+    def test_search_init_mounts_both_configs_and_uses_pinned_plugin(self):
+        init = self.services["qbittorrent-search-init"]
+        mounts = {volume["target"]: volume["source"] for volume in init["volumes"]}
+        self.assertEqual(
+            {
+                "/config": self.test_env["CONFIG_PATH"],
+                "/jackett-config": self.test_env["JACKETT_CONFIG_PATH"],
+            },
+            mounts,
+        )
+        jackett_mount = next(
+            volume for volume in init["volumes"] if volume["target"] == "/jackett-config"
+        )
+        self.assertTrue(jackett_mount["read_only"])
+        environment = init["environment"]
+        self.assertNotIn("JACKETT_API_KEY", environment)
+        self.assertEqual(
+            "https://raw.githubusercontent.com/qbittorrent/search-plugins/"
+            "fa0be6abdc47b8622e8ec71a0d4427d9a7770eab/nova3/engines/jackett.py",
+            environment["JACKETT_PLUGIN_URL"],
+        )
+        self.assertEqual(
+            "04edbb791fbcf870fe61d9f476adff3115c32900d8e24dcfa66381cc1649ed9d",
+            environment["JACKETT_PLUGIN_SHA256"],
+        )
+        self.assertEqual("/config", environment["QBITTORRENT_CONFIG_ROOT"])
+        self.assertEqual("/jackett-config", environment["JACKETT_CONFIG_ROOT"])
+        self.assertEqual(["python3", "-c"], init["entrypoint"])
+
+    def test_search_init_writes_verified_plugin_and_preserves_preferences(self):
+        self.assertIn("qbittorrent-search-init", self.services)
+        init = self.services["qbittorrent-search-init"]
+        script = init["command"][0]
+        plugin = b"# test Jackett plugin\n"
+        api_key = "local-test-api-key-1234"
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            jackett_root = root / "jackett-config"
+            jackett_data = jackett_root / "Jackett"
+            jackett_data.mkdir(parents=True)
+            (jackett_data / "ServerConfig.json").write_text(
+                json.dumps({"APIKey": api_key}), encoding="utf-8"
+            )
+            source = root / "source.py"
+            source.write_bytes(plugin)
+            engines = root / "qBittorrent" / "nova3" / "engines"
+            engines.mkdir(parents=True)
+            config = engines / "jackett.json"
+            config.write_text(
+                json.dumps({"tracker_first": True, "thread_count": 7}),
+                encoding="utf-8",
+            )
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "JACKETT_PLUGIN_URL": source.as_uri(),
+                    "JACKETT_PLUGIN_SHA256": hashlib.sha256(plugin).hexdigest(),
+                    "QBITTORRENT_CONFIG_ROOT": directory,
+                    "JACKETT_CONFIG_ROOT": str(jackett_root),
+                }
+            )
+            result = subprocess.run(
+                ["python3", "-c", script],
+                text=True,
+                capture_output=True,
+                env=environment,
+            )
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertEqual(plugin, (engines / "jackett.py").read_bytes())
+            settings = json.loads(config.read_text(encoding="utf-8"))
+            self.assertEqual(api_key, settings["api_key"])
+            self.assertEqual("http://127.0.0.1:9117", settings["url"])
+            self.assertIs(True, settings["tracker_first"])
+            self.assertEqual(7, settings["thread_count"])
+            self.assertNotIn(api_key, result.stdout + result.stderr)
+
+            source.unlink()
+            cached_result = subprocess.run(
+                ["python3", "-c", script],
+                text=True,
+                capture_output=True,
+                env=environment,
+            )
+            self.assertEqual(0, cached_result.returncode, cached_result.stderr)
+            self.assertEqual(plugin, (engines / "jackett.py").read_bytes())
+
     def test_all_services_have_bounded_json_file_logging(self):
         for service in self.services.values():
             logging = service["logging"]
@@ -184,9 +298,16 @@ class ComposeContractTest(unittest.TestCase):
 
     def test_runtime_lifecycle_settings_are_preserved(self):
         self.assertEqual("gluetun", self.services["gluetun"]["container_name"])
+        self.assertEqual(
+            "qbittorrent-search-init",
+            self.services["qbittorrent-search-init"]["container_name"],
+        )
         self.assertEqual("qBittorrent", self.services["qbittorrent"]["container_name"])
         self.assertEqual("jackett", self.services["jackett"]["container_name"])
-        for service in self.services.values():
+        for name, service in self.services.items():
+            if name == "qbittorrent-search-init":
+                self.assertEqual("no", service["restart"])
+                continue
             self.assertEqual("unless-stopped", service["restart"])
         self.assertEqual("30s", self.services["qbittorrent"]["stop_grace_period"])
 
@@ -213,7 +334,7 @@ class ComposeContractTest(unittest.TestCase):
             "# Jackett",
             "JACKETT_IMAGE=lscr.io/linuxserver/jackett:latest",
             "JACKETT_PORT=9117",
-            "JACKETT_BIND_IP=192.168.1.10",
+            "JACKETT_BIND_IP=192.168.50.101",
             "JACKETT_CONFIG_PATH=/path/to/jackett/config",
         ]
         self.assertEqual(expected, lines[-len(expected) :])
