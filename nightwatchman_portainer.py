@@ -45,6 +45,12 @@ def sanitize_compose(text):
     return mapping_style.sub(r"\1 " + REDACTED, list_style.sub(r"\1" + REDACTED, text))
 
 
+def sanitize_log(text):
+    """Drop credential-bearing log lines instead of trying to identify the value."""
+    sensitive_line = re.compile(r"(?i)password|passphrase|authorization|openvpn_(?:user|password)|\btoken\b")
+    return "".join(line for line in text.splitlines(keepends=True) if not sensitive_line.search(line))
+
+
 def save_session(path, url, environment, jwt):
     path = Path(path)
     contents = f"PORTAINER_URL={url}\nPORTAINER_ENVIRONMENT={environment}\nPORTAINER_JWT={jwt}\n".encode()
@@ -162,7 +168,8 @@ def discover(client, environment, stack_name):
         image = client.get_json(f"{prefix}/images/{detail['Image']}/json")
         inspected[service] = detail
         images[variable_names[service]] = deployable_image(detail, image)
-        logs[service] = client.get_bytes(f"{prefix}/containers/{container_id}/logs?stdout=1&stderr=1&tail=200").decode("utf-8", "replace")
+        raw_log = client.get_bytes(f"{prefix}/containers/{container_id}/logs?stdout=1&stderr=1&tail=200").decode("utf-8", "replace")
+        logs[service] = sanitize_log(raw_log)
 
     qbit_id = by_service["qbittorrent"]["Id"]
     config_path = urlquote("/config/qBittorrent/qBittorrent.conf")

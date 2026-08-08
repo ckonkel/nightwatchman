@@ -93,6 +93,18 @@ class PortainerHelperTests(unittest.TestCase):
         self.assertNotIn("bearer", clean)
         self.assertIn("SAFE: yes", clean)
 
+    def test_log_sanitization_omits_temporary_password_line_but_keeps_safe_lines(self):
+        log = (
+            "qBittorrent started\n"
+            "The WebUI administrator password was not set. A temporary password is provided for this session: Secret123\n"
+            "WebUI listening on port 9081\n"
+        )
+        clean = portainer.sanitize_log(log)
+        self.assertNotIn("Secret123", clean)
+        self.assertNotIn("temporary password", clean)
+        self.assertIn("qBittorrent started", clean)
+        self.assertIn("WebUI listening on port 9081", clean)
+
     def test_password_hash_detection_reads_tar_only_in_memory(self):
         present = archive_with_config("[Preferences]\nWebUI\\Password_PBKDF2=@ByteArray(hash)\n")
         absent = archive_with_config("[Preferences]\nWebUI\\Port=9081\n")
@@ -126,6 +138,9 @@ class PortainerHelperTests(unittest.TestCase):
             routes[("GET", base + f"/api/endpoints/2/docker/containers/{cid}/json")] = {"Id": cid, "Image": image_id, "Config": {"Image": ref}, "Mounts": [], "NetworkSettings": {"Ports": {}}, "State": {"Status": "running"}}
             routes[("GET", base + f"/api/endpoints/2/docker/images/{image_id}/json")] = {"RepoDigests": [digest]}
             routes[("GET", base + f"/api/endpoints/2/docker/containers/{cid}/logs?stdout=1&stderr=1&tail=200")] = b"bounded log"
+        routes[("GET", base + "/api/endpoints/2/docker/containers/q/logs?stdout=1&stderr=1&tail=200")] = (
+            b"qBittorrent started\nA temporary password is provided for this session: Secret123\nWebUI ready\n"
+        )
         routes[("GET", base + "/api/endpoints/2/docker/containers/q/archive?path=%2Fconfig%2FqBittorrent%2FqBittorrent.conf")] = archive_with_config("WebUI\\Password_PBKDF2=hash-that-must-not-persist\n")
         opener = FakeOpener(routes)
         result = portainer.discover(portainer.PortainerClient(base, "jwt", opener), "2", "vpn-qtorrent")
@@ -136,6 +151,9 @@ class PortainerHelperTests(unittest.TestCase):
         self.assertNotIn("hash-that-must-not-persist", json.dumps(result))
         self.assertNotIn("literal-secret", artifact.read_text())
         self.assertNotIn("hash-that-must-not-persist", artifact.read_text())
+        self.assertNotIn("Secret123", artifact.read_text())
+        self.assertIn("qBittorrent started", result["logs"]["qbittorrent"])
+        self.assertIn("WebUI ready", result["logs"]["qbittorrent"])
         self.assertTrue(all(method == "GET" for method, *_ in opener.requests))
         self.assertTrue(any("tail=200" in url for _, url, *_ in opener.requests))
 
